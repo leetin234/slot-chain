@@ -1,0 +1,14 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+.DS_Store
+tools/.venv/
+tools/.work/
+demo/raw.webm
+demo/edit/
+submit/
+*.jks
+*.keystore
+shots/
