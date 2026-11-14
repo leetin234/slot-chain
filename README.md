@@ -34,6 +34,10 @@ tools/.venv/bin/python -I tools/edit_demo.py   # 구간 제목·설명 칩·음�
 - **시설·예약·웨이팅**: 성수동 일대 가상 시설 4곳의 자체 데이터. 다른 고객·사업자 동의는 자동 응답으로 대신합니다. 실제 예약 플랫폼 연동·결제·수수료 정산은 범위 밖입니다.
 - **운전자 음성 응답**: 음성 인식 대신 화면 버튼(또는 `--es say yes`)으로 응답합니다. 안내 음성은 macOS 시스템 음성으로 만든 시연용 TTS입니다.
 
+## 내려받기
+
+설치용 APK는 [Releases](https://github.com/leetin234/slot-chain/releases/latest)에 있습니다(Android Automotive 전용, 디버그 서명). `adb install -r SLOT_CHAIN_debug.apk`
+
 ## 실행
 
 JDK 17, Android SDK 34, Pleos Connect Emulator 2.1.0 기준.
