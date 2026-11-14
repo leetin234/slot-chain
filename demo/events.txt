@@ -1,0 +1,13 @@
+0.02 setup
+6.68 guide
+14.26 trip_a
+14.34 drive
+32.73 swap
+41.81 trip_b
+50.88 park
+56.93 select
+62.99 confirm
+76.07 switched
+83.14 visit
+95.76 sent
+99.81 end
