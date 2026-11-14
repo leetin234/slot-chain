@@ -4,7 +4,10 @@ import re
 import sys
 
 text, n = sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 1
-hits = [b for s, b in re.findall(r'text="([^"]*)"[^>]*bounds="([^"]*)"', sys.stdin.read()) if s.strip() == text]
+xml = sys.stdin.read()
+hits = [b for s, b in re.findall(r'text="([^"]*)"[^>]*bounds="([^"]*)"', xml) if s.strip() == text]
+# 글자가 없는 요소(그림 별점 등)는 content-desc로 찾는다.
+hits += [b for s, b in re.findall(r'content-desc="([^"]*)"[^>]*bounds="([^"]*)"', xml) if s.strip() == text]
 x1, y1, x2, y2 = map(int, re.findall(r"\d+", hits[n - 1]))
 if len(sys.argv) > 4:
     print(x2 + int(sys.argv[3]), y1 + int(sys.argv[4]))
