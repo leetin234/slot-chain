@@ -5,6 +5,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -53,6 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -176,6 +179,7 @@ private fun Setup(ui: UiState, act: Actions) {
                 Gap(18.dp)
                 ListRow("예약", "${ui.bookingTime.ampm()} · ${ui.party}인")
                 ListRow("현재 도착 예정", (17 * 60 + 56).ampm(), DS.green)
+                ListRow("같은 식당 · 도착 시간 공유 중", "${DemoData.ondamOthers.size}팀")
                 Gap(6.dp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     NavArrow(DS.blueText, 16.dp)
@@ -419,16 +423,19 @@ private fun Calm(ui: UiState) = StateBlock(DS.green) {
 
 @Composable
 private fun Ask(ui: UiState, act: Actions) {
-    val newT = ui.plan?.moves?.firstOrNull()?.to ?: (18 * 60 + 15)
+    val plan = ui.plan
+    val newT = plan?.moves?.firstOrNull()?.to ?: (18 * 60 + 15)
     StateBlock(DS.orange) {
         T("${ui.arrival - ui.bookingTime}분 늦을 것 같아요", DS.title2)
-        Gap(4.dp)
-        T("예약을 ${newT.clock()}로 바꿀까요? 허용 범위 안이고 수수료는 없어요", DS.body2, DS.text2)
-        Spacer(Modifier.weight(1f))
-        T("찾은 방법 · ${ui.plan?.kind ?: ""}", DS.caption.copy(fontWeight = FontWeight.Bold), DS.orange)
+        Gap(2.dp)
+        T("늦는 손님 · 일찍 온 손님과 시간을 맞바꾸면 모두 덜 기다려요", DS.body2, DS.text2)
+        Gap(14.dp)
+        ChainBoard(ui, Modifier.fillMaxWidth().weight(1f), progress = List(plan?.moves?.size ?: 0) { 0f }, preview = true)
         Gap(10.dp)
-        Moves(ui.plan?.moves.orEmpty(), emptyList(), preview = true)
-        Spacer(Modifier.weight(1f))
+        if (plan != null) Deltas(plan)
+        Gap(6.dp)
+        T("${(plan?.checked ?: 0) + (plan?.explored ?: 0)}가지 경우를 계산해 지각·대기가 가장 적은 ${plan?.kind ?: ""}을 골랐어요", DS.caption, DS.text3)
+        Gap(14.dp)
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Button("${newT.clock()}로 바꾸기", Modifier.weight(1.4f)) { act.answer(true) }
             Button("그대로 둘게요", Modifier.weight(1f), Btn.SECONDARY) { act.answer(false) }
@@ -436,20 +443,91 @@ private fun Ask(ui: UiState, act: Actions) {
     }
 }
 
+/** 지각 팀 · 대기 합계 · 빈 테이블 시간의 전후 비교. */
 @Composable
-private fun Moves(moves: List<Move>, consented: List<Int>, preview: Boolean) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun Deltas(plan: Plan, big: Boolean = false) {
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Delta(Modifier.weight(1f), "늦는 팀", "${plan.before.lateTeams}팀", "${plan.after.lateTeams}팀", big)
+        Delta(Modifier.weight(1f), "모두의 대기", "${plan.before.waitMin}분", "${plan.after.waitMin}분", big)
+        Delta(Modifier.weight(1f), "빈 테이블", "${plan.before.lateMin}분", "${plan.after.lateMin}분", big)
+    }
+}
+
+@Composable
+private fun Delta(modifier: Modifier, label: String, before: String, after: String, big: Boolean) {
+    Column(modifier.clip(RoundedCornerShape(14.dp)).background(Color(0x33000000)).padding(horizontal = 16.dp, vertical = if (big) 14.dp else 10.dp)) {
+        T(label, DS.caption, DS.text2)
+        Row(verticalAlignment = Alignment.Bottom) {
+            T(before, DS.body1, DS.text3, maxLines = 1)
+            T(" → ", DS.body2, DS.text3)
+            T(after, if (big) DS.title2 else DS.title3, DS.green, maxLines = 1)
+        }
+    }
+}
+
+/**
+ * 식당 한 곳의 시간대(5:45~6:45)를 가로로 놓고, 각 예약 팀을 토큰으로 그린다.
+ * 토큰 아래는 공유된 도착 예정(늦음=빨강, 일찍=회색 대기, 맞음=초록).
+ * 이동은 위로 휘는 화살표(사슬)로 그리고, progress에 따라 토큰이 새 자리로 미끄러진다.
+ */
+@Composable
+private fun ChainBoard(ui: UiState, modifier: Modifier, progress: List<Float>, preview: Boolean) {
+    val me = DemoData.myBooking
+    val all = DemoData.ondamOthers + me
+    val moves = ui.plan?.moves.orEmpty()
+    val slots = DemoData.ondam.slots
+    val arrival = DemoData.ondamOthers.associate { it.id to (it.eta ?: it.time) } + (me.id to ui.arrival)
+    val anim = progress.mapIndexed { i, p -> animateFloatAsState(p, tween(900, easing = FastOutSlowInEasing), label = "mv$i").value }
+    val inf = androidx.compose.animation.core.rememberInfiniteTransition(label = "chain")
+    val flow by inf.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(tween(1200, easing = androidx.compose.animation.core.LinearEasing)), label = "flow")
+    Canvas(modifier) {
+        val n = slots.size
+        val pad = 40f
+        val sx = { t: Int -> pad + (size.width - 2 * pad) * slots.indexOf(t) / (n - 1) }
+        val baseY = size.height * 0.78f
+        val tokY = size.height * 0.46f
+        val r = minOf(30f, size.height * 0.13f)
+        val txt = android.graphics.Paint().apply { isAntiAlias = true; textAlign = android.graphics.Paint.Align.CENTER; typeface = android.graphics.Typeface.DEFAULT_BOLD }
+        // 시간대 칸.
+        slots.forEach { t ->
+            val x = sx(t)
+            drawRoundRect(DS.surfaceHi, Offset(x - 56f, baseY - 6f), Size(112f, 40f), CornerRadius(12f))
+            txt.color = DS.text2.toArgb(); txt.textSize = 24f
+            drawContext.canvas.nativeCanvas.drawText(t.clock(), x, baseY + 22f, txt)
+        }
+        // 사슬 화살표.
         moves.forEachIndexed { i, m ->
-            val ok = !preview && i in consented
-            val bg by animateColorAsState(if (ok) DS.weak(DS.green) else DS.surfaceHi, tween(250), label = "m$i")
-            Column(Modifier.weight(1f).clip(RoundedCornerShape(16.dp)).background(bg).padding(horizontal = 16.dp, vertical = 14.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    T(m.owner, DS.caption.copy(fontWeight = FontWeight.Bold), if (i == 0) DS.blueText else DS.text2, Modifier.weight(1f))
-                    if (!preview) { if (ok) CheckCircle(DS.green, 20.dp) else Spinner(Modifier.size(18.dp), DS.text3) }
-                }
-                Gap(2.dp)
-                T("${m.from.clock()} → ${m.to.clock()}", DS.body1)
-            }
+            val x0 = sx(m.from); val x1 = sx(m.to)
+            val lift = size.height * (0.30f + 0.06f * (i % 2))
+            val path = Path().apply { moveTo(x0, tokY - r - 4f); quadraticBezierTo((x0 + x1) / 2, tokY - r - lift, x1, tokY - r - 4f) }
+            val c = if (i == 0) DS.blue else Color(0xFF8B7BFF)
+            drawPath(path, c.copy(alpha = 0.25f), style = Stroke(10f, cap = StrokeCap.Round))
+            drawPath(path, c, style = Stroke(4f, cap = StrokeCap.Round, pathEffect = if (preview) androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(14f, 12f), -flow * 26f) else null))
+            // 화살촉.
+            val dir = if (x1 > x0) 1f else -1f
+            val hx = x1; val hy = tokY - r - 4f
+            drawPath(Path().apply { moveTo(hx, hy + 2f); lineTo(hx - 12f * dir, hy - 14f); lineTo(hx + 6f * dir, hy - 12f); close() }, c)
+        }
+        // 토큰.
+        all.forEach { b ->
+            val mi = moves.indexOfFirst { it.bookingId == b.id }
+            val p = if (mi >= 0) anim.getOrElse(mi) { 0f } else 0f
+            val from = sx(b.time)
+            val to = if (mi >= 0) sx(moves[mi].to) else from
+            val x = from + (to - from) * p
+            val y = tokY - kotlin.math.sin(Math.PI * p).toFloat() * size.height * 0.22f
+            val slot = if (p > 0.5f && mi >= 0) moves[mi].to else b.time
+            val arr = arrival.getValue(b.id)
+            val state = when { arr > slot -> DS.red; slot - arr > 10 -> DS.text3; else -> DS.green }
+            val fill = when { b.id == "me" -> DS.blue; mi >= 0 -> Color(0xFF6E5CF0); else -> Color(0xFF3A3A44) }
+            drawCircle(Color.Black.copy(alpha = 0.3f), r + 2f, Offset(x, y + 3f))
+            drawCircle(fill, r, Offset(x, y))
+            txt.color = android.graphics.Color.WHITE; txt.textSize = r * 0.8f
+            drawContext.canvas.nativeCanvas.drawText(if (b.id == "me") "나" else b.owner.takeLast(1), x, y + r * 0.28f, txt)
+            // 도착 예정 꼬리표.
+            val label = when { arr > slot -> "${arr - slot}분 늦음"; slot - arr > 10 -> "${slot - arr}분 대기"; else -> "도착 ${arr.clock()}" }
+            txt.textSize = 20f; txt.color = state.toArgb()
+            drawContext.canvas.nativeCanvas.drawText(label, x, y + r + 26f, txt)
         }
     }
 }
@@ -461,13 +539,23 @@ private fun Working(ui: UiState) {
     StateBlock(DS.blue) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Spinner(Modifier.size(26.dp), DS.blueText)
-            T("  관련된 분들께 동의를 받고 있어요", DS.title3)
+            T("  ${moves.size}팀이 함께 시간을 맞바꾸는 중", DS.title3)
         }
-        Gap(6.dp)
-        T("${ui.plan?.kind ?: ""} · 각자 정해둔 변경 허용 범위 안에서만 움직여요", DS.body2, DS.text2)
-        Spacer(Modifier.weight(1f))
-        Moves(moves, ui.consented, preview = false)
-        Spacer(Modifier.weight(1f))
+        Gap(4.dp)
+        T("동의한 팀부터 새 자리로 옮겨요 · 각자 정해둔 변경 허용 범위 안에서만", DS.body2, DS.text2)
+        Gap(10.dp)
+        ChainBoard(ui, Modifier.fillMaxWidth().weight(1f), progress = moves.indices.map { if (it in ui.consented) 1f else 0f }, preview = false)
+        Gap(8.dp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            moves.forEachIndexed { i, m ->
+                val ok = i in ui.consented
+                Row(Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(if (ok) DS.weak(DS.green) else DS.surfaceHi).padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (ok) CheckCircle(DS.green, 18.dp) else Spinner(Modifier.size(16.dp), DS.text3)
+                    T("  ${m.owner} 동의", DS.caption.copy(fontWeight = FontWeight.Bold), if (ok) DS.green else DS.text2)
+                }
+            }
+        }
+        Gap(10.dp)
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (biz) CheckCircle(DS.green, 22.dp) else Spinner(Modifier.size(22.dp), DS.text3)
             T("  식당 승인 · 도착 시간을 다시 확인한 뒤 한 번에 확정", DS.body2, if (biz) DS.green else DS.text2)
@@ -479,23 +567,20 @@ private fun Working(ui: UiState) {
 private fun Done(ui: UiState) {
     val s = remember { Animatable(0.5f) }
     LaunchedEffect(Unit) { s.animateTo(1f, spring(dampingRatio = 0.5f, stiffness = 300f)) }
+    val plan = ui.plan
     StateBlock(DS.green) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.scale(s.value)) { CheckCircle(DS.green, 52.dp) }
-            Spacer(Modifier.width(16.dp))
+            Box(Modifier.scale(s.value)) { CheckCircle(DS.green, 48.dp) }
+            Spacer(Modifier.width(14.dp))
             Column {
-                T("예약을 ${ui.bookingTime.clock()}로 바꿨어요", DS.title2)
-                T("${ui.plan?.kind ?: ""} · ${ui.plan?.moves?.size ?: 0}팀과 식당이 모두 동의했어요", DS.body2, DS.text2)
+                T("예약을 ${ui.bookingTime.clock()}로 바꿨어요 · 아무도 늦지 않아요", DS.title3)
+                T("${plan?.kind ?: ""} · ${plan?.moves?.size ?: 0}팀과 식당이 모두 동의 · 도착 ${ui.arrival.clock()} · ${ui.bookingTime - ui.arrival}분 여유", DS.body2, DS.text2)
             }
         }
-        Spacer(Modifier.weight(1f))
-        Row {
-            Fact(Modifier.weight(1f), "새 예약", ui.bookingTime.clock(), DS.text)
-            Fact(Modifier.weight(1f), "도착 예정", ui.arrival.clock(), DS.text)
-            Fact(Modifier.weight(1f), "여유", "${ui.bookingTime - ui.arrival}분", DS.green)
-        }
-        Spacer(Modifier.weight(1f))
-        T("도착 시간을 계속 공유해요 · 다시 늦어지면 먼저 알려드릴게요", DS.caption, DS.text3)
+        Gap(10.dp)
+        ChainBoard(ui, Modifier.fillMaxWidth().weight(1f), progress = List(plan?.moves?.size ?: 0) { 1f }, preview = false)
+        Gap(8.dp)
+        if (plan != null) Deltas(plan, big = true)
     }
 }
 
@@ -832,7 +917,7 @@ private fun VoiceBar(ui: UiState, modifier: Modifier) {
     AnimatedVisibility(b != null, modifier, enter = fadeIn(tween(220)) + slideInVertically(tween(340)) { it / 2 }, exit = fadeOut(tween(250))) {
         val bub = b ?: Bubble("", false)
         Row(
-            Modifier.widthIn(max = 640.dp).clip(RoundedCornerShape(32.dp)).background(Color(0xF22C2C35)).padding(start = 12.dp, end = 22.dp, top = 12.dp, bottom = 12.dp),
+            Modifier.widthIn(max = 520.dp).clip(RoundedCornerShape(32.dp)).background(Color(0xF22C2C35)).padding(start = 12.dp, end = 22.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             VoiceOrb(Modifier.size(52.dp), active = true)

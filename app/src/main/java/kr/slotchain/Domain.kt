@@ -33,57 +33,89 @@ data class Booking(
     val early: Int,
     val late: Int,
     val owner: String,
+    /** 공유된 도착 예정. 없으면 예약 시간에 맞춰 온다고 본다. */
+    val eta: Minute? = null,
 ) {
     fun accepts(t: Minute) = t - time in -early..late
 }
 
 data class Move(val bookingId: String, val owner: String, val from: Minute, val to: Minute)
 
-/** 예약 조정안. moves가 비면 조정 불가. */
-data class Plan(val moves: List<Move>, val reason: String) {
+/** 한 식당의 배치 품질. 지각 = 테이블이 비어 있는 시간, 대기 = 손님이 먼저 와서 기다리는 시간. */
+data class Score(val lateTeams: Int, val lateMin: Int, val waitMin: Int) {
+    val cost get() = lateMin * 3 + waitMin
+    companion object { val ZERO = Score(0, 0, 0) }
+}
+
+/** 예약 조정안. moves가 비면 조정 불가. explored는 비교한 배치 수. */
+data class Plan(
+    val moves: List<Move>,
+    val reason: String,
+    val before: Score = Score.ZERO,
+    val after: Score = Score.ZERO,
+    val explored: Int = 0,
+    val valid: Int = 0,
+    /** 엔진이 실제로 따져 본 이동 경우의 수(허용 범위·자리 충돌 검사 포함). */
+    val checked: Int = 0,
+) {
     val ok get() = moves.isNotEmpty()
-    val kind get() = when (moves.size) { 0 -> "불가"; 1 -> "빈 슬롯"; 2 -> "2인 교환"; else -> "${moves.size}자 순환 교환" }
+    val kind get() = when (moves.size) { 0 -> "불가"; 1 -> "빈 슬롯"; 2 -> "2인 교환"; else -> "${moves.size}팀 순환 교환" }
 }
 
 /**
- * 같은 시설 안에서 내 예약을 ETA 이후·허용 범위 안의 시간으로 옮긴다.
- * 빈 슬롯이 없으면 호환 예약(같거나 큰 테이블에 맞는 인원, 각자의 허용 범위 안)끼리
- * 2인 교환 또는 순환 교환을 찾는다. 모든 이동은 각 고객의 허용 범위를 넘지 않는다.
+ * 같은 식당 안에서 내 예약을 ETA 이후·허용 범위 안의 시간으로 옮기는 모든 방법을 만들어 본다.
+ * 빈 슬롯, 2인 교환, 여러 팀 순환 교환을 전부 나열한 뒤 각 팀의 공유 ETA로
+ * 지각(테이블 빈 시간)과 대기를 계산해 가장 적은 배치를 고른다.
+ * 제약: 각 팀의 허용 범위 안, 원래 제시간이던 팀을 늦게 만들지 않음, 내 새 시간은 내 ETA 이후.
  */
 object SlotEngine {
+    private var checked = 0
+
     fun adjust(mine: Booking, eta: Minute, facility: Facility, others: List<Booking>, maxChain: Int = 4): Plan {
-        if (eta <= mine.time) return Plan(emptyList(), "제시간 도착 예상")
-        val taken = others.filter { it.facilityId == facility.id }.associateBy { it.time }
-        val targets = facility.slots.filter { it >= eta && it > mine.time && mine.accepts(it) }.sorted()
-        if (targets.isEmpty()) return Plan(emptyList(), "허용 범위 안에 도착 가능한 슬롯 없음")
-        for (t in targets) {
-            if (t !in taken) return Plan(listOf(Move(mine.id, mine.owner, mine.time, t)), "빈 슬롯")
-        }
-        // 순환 교환: 내가 t로 가면 t의 손님은 다른 시간으로, … 마지막 손님이 내 원래 시간(또는 빈 슬롯)으로.
+        val here = others.filter { it.facilityId == facility.id }
+        val arrival = (here.associate { it.id to (it.eta ?: it.time) }) + (mine.id to eta)
+        val all = here + mine
+        val before = score(all, emptyList(), arrival)
+        if (eta <= mine.time) return Plan(emptyList(), "제시간 도착 예상", before, before)
+        val taken = here.associateBy { it.time }
+        val targets = facility.slots.filter { it >= eta && it > mine.time && mine.accepts(it) }
+        val found = mutableListOf<List<Move>>()
+        checked = facility.slots.size
         for (t in targets) {
             val chain = mutableListOf(Move(mine.id, mine.owner, mine.time, t))
-            if (extend(chain, taken, facility, mine, maxChain)) return Plan(chain.toList(), "호환 예약 교환")
+            if (t !in taken) found += chain.toList() else collect(chain, taken, facility, maxChain, found)
         }
-        return Plan(emptyList(), "호환 예약 없음")
+        val ok = found.filter { plan ->
+            plan.drop(1).all { m -> val arr = arrival.getValue(m.bookingId); arr > m.from || m.to >= arr }
+        }
+        val best = ok.minWithOrNull(compareBy({ score(all, it, arrival).cost }, { it.size }))
+            ?: return Plan(emptyList(), if (targets.isEmpty()) "허용 범위 안에 도착 가능한 슬롯 없음" else "호환 예약 없음", before, before, found.size, 0, checked)
+        return Plan(best, if (best.size == 1) "빈 슬롯" else "호환 예약 교환", before, score(all, best, arrival), found.size, ok.size, checked)
     }
 
-    private fun extend(chain: MutableList<Move>, taken: Map<Minute, Booking>, f: Facility, mine: Booking, maxChain: Int): Boolean {
-        val displaced = taken[chain.last().to] ?: return true
-        if (chain.size >= maxChain || chain.any { it.bookingId == displaced.id }) return false
-        if (displaced.party > f.maxParty) return false
+    fun score(all: List<Booking>, moves: List<Move>, arrival: Map<String, Minute>): Score {
+        var teams = 0; var late = 0; var wait = 0
+        for (b in all) {
+            val slot = moves.firstOrNull { it.bookingId == b.id }?.to ?: b.time
+            val arr = arrival.getValue(b.id)
+            if (arr > slot) { teams++; late += arr - slot } else wait += slot - arr
+        }
+        return Score(teams, late, wait)
+    }
+
+    /** 밀려난 손님을 비워진 자리·빈 슬롯·다른 예약 자리로 옮기는 모든 사슬을 모은다. */
+    private fun collect(chain: MutableList<Move>, taken: Map<Minute, Booking>, f: Facility, maxChain: Int, out: MutableList<List<Move>>) {
+        val displaced = taken[chain.last().to] ?: return run { out += chain.toList() }
+        if (chain.size >= maxChain || chain.any { it.bookingId == displaced.id } || displaced.party > f.maxParty) return
         val used = chain.map { it.to }.toSet()
         val vacated = chain.map { it.from }.toSet()
-        // 비워진 자리(교환 완성) → 빈 슬롯 → 다른 예약 자리(사슬 연장) 순으로 시도.
-        val options = f.slots
-            .filter { s -> s != displaced.time && s !in used && displaced.accepts(s) }
-            .sortedWith(compareBy({ if (it in vacated) 0 else if (it !in taken) 1 else 2 }, { kotlin.math.abs(it - displaced.time) }))
-        for (s in options) {
+        for (s in f.slots) {
+            checked++
+            if (s == displaced.time || s in used || !displaced.accepts(s)) continue
             chain += Move(displaced.id, displaced.owner, displaced.time, s)
-            if (s in vacated || s !in taken) return true
-            if (extend(chain, taken, f, mine, maxChain)) return true
+            if (s in vacated || s !in taken) out += chain.toList() else collect(chain, taken, f, maxChain, out)
             chain.removeLast()
         }
-        return false
     }
 }
 

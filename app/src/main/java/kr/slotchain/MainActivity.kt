@@ -35,7 +35,7 @@ class UiState {
     var party by mutableIntStateOf(4)
     var menu by mutableStateOf("한식")
     var price by mutableIntStateOf(1)
-    var toleranceIdx by mutableIntStateOf(2)
+    var toleranceIdx by mutableIntStateOf(3)
     var allowAlt by mutableStateOf(true)
     var parkingOnly by mutableStateOf(true)
     var shareEta by mutableStateOf(true)
@@ -134,9 +134,10 @@ class MainActivity : ComponentActivity() {
             ui.congestion = true
             ui.arrival = 18 * 60 + 10
             ui.alert = Alert.ASK
-            ui.plan = SlotEngine.adjust(DemoData.myBooking, ui.arrival, DemoData.ondam, DemoData.ondamOthers)
-            Log.i("SlotFlow", "late eta=${ui.arrival.clock()} plan=${ui.plan}")
-            ui.bubble = Bubble("예약보다 10분 늦을 것 같아요. 6시 15분으로 바꿀까요?", false)
+            val tol = listOf(0, 10, 20, 30)[ui.toleranceIdx]
+            ui.plan = SlotEngine.adjust(DemoData.myBooking.copy(early = tol, late = tol), ui.arrival, DemoData.ondam, DemoData.ondamOthers)
+            Log.i("SlotFlow", "late eta=${ui.arrival.clock()} explored=${ui.plan?.explored} valid=${ui.plan?.valid} before=${ui.plan?.before} after=${ui.plan?.after} moves=${ui.plan?.moves}")
+            ui.bubble = Bubble("10분 늦을 것 같아요. 늦는 손님·일찍 온 손님과 맞바꾸면 모두 덜 기다려요. 6시 15분으로 바꿀까요?", false)
             voice.say("prompt_late") { main.postDelayed({ if (ui.alert == Alert.ASK) ui.bubble = null }, 4_000) }
         }
         if (left <= 0f && before < ui.arrival) Log.i("SlotFlow", "arrived")
